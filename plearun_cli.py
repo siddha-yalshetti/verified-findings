@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
-import sys
 from pathlib import Path
+from typing import Sequence
 
 from core.clock_sync import ClockSynchronizationEngine
 from core.evidence_parsers import BodycamVTTParser, CameraCSVParser, DispatchJSONParser, OfficerNotesParser
@@ -50,18 +51,24 @@ def make_findings(report_path: Path, records_dir: Path):
     return {"findings": results}
 
 
-def main(argv):
-    if len(argv) != 3:
-        print("Usage: python3 plearun_cli.py REPORT RECORDS_DIR", file=sys.stderr)
-        sys.exit(2)
-    report_path = Path(argv[1])
-    records_dir = Path(argv[2])
-    if not report_path.exists() or not records_dir.exists():
-        print("Input paths must exist.", file=sys.stderr)
-        sys.exit(2)
-    result = make_findings(report_path, records_dir)
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify incident report claims against local evidence records."
+    )
+    parser.add_argument("report", type=Path, help="path to the incident report")
+    parser.add_argument("records_dir", type=Path, help="directory containing evidence files")
+    args = parser.parse_args(argv)
+    if not args.report.is_file():
+        parser.error(f"report is not a file: {args.report}")
+    if not args.records_dir.is_dir():
+        parser.error(f"records directory does not exist: {args.records_dir}")
+    try:
+        result = make_findings(args.report, args.records_dir)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        parser.exit(2, f"error: unable to process input: {error}\n")
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    raise SystemExit(main())

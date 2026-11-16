@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +10,7 @@ from core.evidence_parsers import BodycamVTTParser, CameraCSVParser, DispatchJSO
 from core.report_processor import ReportProcessor
 from core.timestamp_service import TimestampService
 from core.verification import CitationValidator, VerificationEngine
-from plearun_cli import make_findings
+from plearun_cli import main, make_findings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +65,22 @@ class ClockSynchronizationTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_cli_help_is_available(self):
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as result:
+            main(["--help"])
+
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn("Verify incident report claims", output.getvalue())
+
+    def test_cli_reports_missing_input_path(self):
+        error = StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit) as result:
+            main(["missing-report.txt", "records"])
+
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn("report is not a file", error.getvalue())
+
     def test_all_supported_evidence_parsers_return_records(self):
         records_dir = ROOT / "records"
         records = (
@@ -84,16 +102,22 @@ class PipelineTests(unittest.TestCase):
         findings = make_findings(report_path, records_dir)["findings"]
 
         self.assertTrue(findings)
+        self.assertEqual(
+            [finding["finding"] for finding in findings],
+            ["not_settled", "not_settled", "match", "match", "not_checkable"],
+        )
         for finding in findings:
             self.assertIn(finding["finding"], {"match", "conflict", "not_settled", "not_checkable"})
             self.assertIn("claim", finding)
             if finding["finding"] in {"match", "conflict"}:
+                self.assertEqual(set(finding), {"claim", "finding", "cite", "quote"})
                 self.assertIn("cite", finding)
                 self.assertIn("quote", finding)
                 self.assertTrue(
                     CitationValidator.validate(records_dir / finding["cite"]["file"], finding["quote"])
                 )
             else:
+                self.assertEqual(set(finding), {"claim", "finding"})
                 self.assertNotIn("cite", finding)
                 self.assertNotIn("quote", finding)
 
@@ -155,6 +179,64 @@ class PipelineTests(unittest.TestCase):
             result = VerificationEngine.verify(claim, evidence, directory)
 
         self.assertIn(result["finding"], {"not_settled", "not_checkable"})
+
+    def test_compound_speed_claim_needs_matching_claim_time(self):
+        claim = ReportProcessor.extract_claims(
+            "The sedan was at mile marker 4 at about 21:14, travelling 58 mph."
+        )[0]
+        evidence = [
+            SimpleNamespace(
+                raw="00:00:00.000 --> 00:00:04.000\nOfficer Lee: 58 in a 45.",
+                source="bodycam",
+                source_file="bodycam.vtt",
+                row_number=1,
+                parsed={"text": "Officer Lee: 58 in a 45."},
+            )
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = VerificationEngine.verify(claim, evidence, directory)
+
+        self.assertEqual(result["finding"], "not_settled")
+
+    def test_unaligned_camera_clock_cannot_create_speed_conflict(self):
+        claim = ReportProcessor.extract_claims(
+            "The sedan was observed at about 21:14, travelling 58 mph."
+        )[0]
+        camera = SimpleNamespace(
+            raw="2026-03-02T21:10:21-05:00,CAM-03,39,45",
+            source="camera",
+            timestamp="2026-03-02T21:10:21-05:00",
+            parsed={"speed_mph": "39", "zone_mph": "45"},
+        )
+
+        self.assertEqual(VerificationEngine._record_supports_speed(claim, camera), "unknown")
+
+    def test_relative_stop_interval_requires_both_events_and_plausible_elapsed_time(self):
+        claim = ReportProcessor.extract_claims(
+            "Dispatch records show a unit on scene roughly 2 minutes after the stop."
+        )[0]
+        scene = SimpleNamespace(
+            raw='{"type":"unit_on_scene","logged":"2026-03-02T21:17:19-05:00"}',
+            parsed={"type": "unit_on_scene", "logged": "2026-03-02T21:17:19-05:00"},
+        )
+        stop = SimpleNamespace(
+            raw="00:00:06.000 --> 00:00:12.000\nOfficer Lee: Pulling in at the lot, about 21:16.",
+            parsed={"text": "Officer Lee: Pulling in at the lot, about 21:16."},
+        )
+        late_scene = SimpleNamespace(
+            raw='{"type":"unit_on_scene","logged":"2026-03-02T21:20:30-05:00"}',
+            parsed={"type": "unit_on_scene", "logged": "2026-03-02T21:20:30-05:00"},
+        )
+
+        self.assertEqual(
+            VerificationEngine._record_supports_relative_stop_time(claim, scene, [scene, stop]),
+            "support",
+        )
+        self.assertEqual(
+            VerificationEngine._record_supports_relative_stop_time(claim, late_scene, [late_scene, stop]),
+            "unknown",
+        )
 
 
 if __name__ == "__main__":

@@ -1,33 +1,31 @@
 # Verified Findings
 
-Tools used: Python standard library for implementation and tests; VS Code and Copilot in VS Code for editing and reasoning; the supplied candidate pack for fixtures and requirements; and the local shell for running the CLI and tests. The implementation is entirely offline and does not call any external service. `mock_llm.py` is not used by the CLI.
+An offline Python CLI that checks report claims against camera, dispatch, officer-note, and body-camera records. It uses no network, external service, or third-party dependency. `mock_llm.py` is supplied as an optional interface example and is not called by this implementation.
 
-This project checks incident-report claims against machine evidence without network access. The verifier is deliberately conservative: if the evidence is weak or ambiguous, it prefers `not_settled` or `not_checkable` over a risky `conflict`.
+## Run
 
-## How it works
+From the project directory:
 
-- The report is split into sentence-level claims and tagged by type such as speed, time, event, or count.
-- Each record file is normalized into evidence objects that preserve the exact raw text, row or cue number, source filename, and timestamp metadata.
-- The clock synchronizer looks for repeated, clearly labeled events in different sources. It estimates an offset only with at least two shared events whose offsets agree within 30 seconds; otherwise that source is left unaligned.
-- Timestamps support Unix-millisecond, ISO-8601, local-time, and WebVTT values while leaving original raw strings intact for citation validation.
-- Candidate evidence is ranked by keywords, numeric matches, and time proximity before any finding is produced.
-- Findings are only emitted when the evidence is direct and reliable; otherwise the code falls back to `not_settled` and `not_checkable`.
-- Every match or conflict is re-checked against the original source text to confirm the citation exists and the quote is an exact substring before final output.
+```powershell
+python plearun_cli.py reports/report_fictional_02.txt records
+python -m unittest discover -s tests -v
+```
 
-## Three hardest decisions
+The CLI prints the required JSON to stdout. To save it, append `> findings.json`. `make test` is also available where GNU Make is installed. A sample result is included in [`findings.json`](./findings.json).
 
-1. Clock drift and device offsets. The tool requires two consistent shared-event anchors and refuses alignment when there is not enough agreement.
-2. False conflicts. A noisy or unrelated machine record should not trigger a conflict when one direct piece of evidence is very strong. The verifier prefers high-quality direct support and ignores weak contradictions.
-3. Messy file handling. The project is built to tolerate a BOM-prefixed CSV, Windows-1252 text, nested JSON events, and WebVTT cues while preserving exact raw strings for verification.
+## Design
 
-## What it gets wrong
+1. Split the report into sentence-level claims and extract useful numbers, times, and keywords.
+2. Parse each supported evidence format into records carrying the exact source text, filename, row/cue number, and parsed fields.
+3. Rank records as candidates, apply conservative claim-specific checks, and validate every citation against both its record and source file before emitting a match or conflict.
+4. Estimate clock offsets only from at least two shared, recognizable events whose offsets agree within 30 seconds. Otherwise, leave that source unaligned.
 
-It is conservative by design, so it can return `not_settled` instead of a stronger but less certain finding. Its event and claim language matching is rule-based, not a general natural-language understanding system. It also does not invent missing evidence or create facts that are not in the source records.
+The three hardest decisions were: preserving citation fidelity across BOM, CP1252, nested JSON, and WebVTT; avoiding a “match” when a compound claim has only partial support; and requiring repeated, consistent anchors before aligning unsynchronized clocks. Relative-time claims are checked against both the event and stop timestamps rather than inferred from a single record.
 
-## What would fail first on real records
+## Limitations
 
-The first brittle cases are vague narrative claims without direct numbers, repeated event names over long logs, and records with contradictory time zones or deceptive timestamps. Those situations usually trigger uncertainty instead of a reckless conflict. The offset estimator also cannot align a source without at least two recognizable shared events.
+Language and event matching are rule-based, not general natural-language understanding. Ambiguous, unsupported, or only partially supported claims may be `not_settled` or `not_checkable`; the tool favors that over an unjustified conflict. Clock offsets cannot be estimated without enough recognizable shared events. Real records with undocumented time zones, vague locations, unusual encodings, or novel formats would need additional parsers and validation.
 
-## Run and test
+## Tools
 
-From this directory, run `python plearun_cli.py reports/report_fictional_02.txt records`. Run tests with `python -m unittest discover -s tests -v` (or `make test` where `make` is installed).
+Python standard library, VS Code, and Copilot in VS Code were used for implementation and testing; the supplied candidate pack provides the requirements and fictional fixtures. All runs and tests are local.
